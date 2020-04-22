@@ -18,8 +18,8 @@ use crate::utils::other::get_genesis_info;
 use interactive::InteractiveEnv;
 use subcommands::{
     start_index_thread, AccountSubCommand, ApiServerSubCommand, CliSubCommand, DAOSubCommand,
-    MockTxSubCommand, MoleculeSubCommand, RpcSubCommand, TxSubCommand, UtilSubCommand,
-    WalletSubCommand,
+    DCKBSubCommand, MockTxSubCommand, MoleculeSubCommand, RpcSubCommand, TxSubCommand,
+    UtilSubCommand, WalletSubCommand,
 };
 use utils::other::sync_to_tip;
 use utils::{
@@ -183,6 +183,20 @@ fn main() -> Result<(), io::Error> {
                 })
             })
         }
+        ("dckb", Some(sub_matches)) => {
+            get_genesis_info(&None, &mut rpc_client).and_then(|genesis_info| {
+                get_key_store(&ckb_cli_dir).and_then(|mut key_store| {
+                    DCKBSubCommand::new(
+                        &mut rpc_client,
+                        &mut key_store,
+                        genesis_info,
+                        index_dir.clone(),
+                        index_controller.clone(),
+                    )
+                    .process(&sub_matches, output_format, color, debug)
+                })
+            })
+        }
         _ => {
             if let Err(err) =
                 InteractiveEnv::from_config(ckb_cli_dir, config, index_controller.clone())
@@ -260,6 +274,7 @@ pub fn build_cli<'a>(version_short: &'a str, version_long: &'a str) -> App<'a> {
         .subcommand(MoleculeSubCommand::subcommand("molecule"))
         .subcommand(WalletSubCommand::subcommand())
         .subcommand(DAOSubCommand::subcommand())
+        .subcommand(DCKBSubCommand::subcommand())
         .arg(
             Arg::with_name("url")
                 .long("url")
@@ -363,4 +378,5 @@ pub fn build_interactive() -> App<'static> {
         .subcommand(MoleculeSubCommand::subcommand("molecule"))
         .subcommand(WalletSubCommand::subcommand())
         .subcommand(DAOSubCommand::subcommand())
+        .subcommand(DCKBSubCommand::subcommand())
 }
