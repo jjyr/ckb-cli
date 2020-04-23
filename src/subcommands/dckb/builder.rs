@@ -43,29 +43,50 @@ impl DAOBuilder {
         rpc_client: &mut HttpRpcClient,
         dckb_live_cells: Vec<DCKBLiveCellInfo>,
         tip: HeaderView,
-        capacity: u64,
+        dckb_amount: u64,
+        target_capacity: u64,
         target_lock: Script,
     ) -> Result<TransactionView, String> {
         let genesis_info = &self.genesis_info;
         let inputs = dckb_live_cells
             .iter()
             .map(|txo| CellInput::new(txo.cell.out_point(), 0))
+            .chain(
+                self.live_cells
+                    .iter()
+                    .map(|cell| CellInput::new(cell.out_point(), 0)),
+            )
             .collect::<Vec<_>>();
 
-        let input_capacity = dckb_live_cells
+        let input_dckb_amount = dckb_live_cells
             .iter()
             .map(|txo| txo.dckb_amount)
             .sum::<u64>();
-        let change_capacity = input_capacity - capacity;
+        let change_dckb_amount = input_dckb_amount - dckb_amount;
+
+        let input_capacity = self
+            .live_cells
+            .iter()
+            .map(|txo| txo.capacity)
+            .chain(dckb_live_cells.iter().map(|cell| cell.cell.capacity))
+            .sum::<u64>();
+        let change_capacity = input_capacity
+            - target_capacity
+            - Capacity::bytes(61).unwrap().as_u64()
+            - 2 * DCKB_CAPACITY;
 
         let (dckb_output, dckb_output_data) = {
             // NOTE: Here give null lock script to the output. It's caller's duty to fill the lock
-            gen_dckb_cell(self.dckb_env.clone(), capacity, tip.number())
+            gen_dckb_cell(self.dckb_env.clone(), dckb_amount, tip.number())
         };
+        // set transfer target
         let dckb_output = dckb_output.as_builder().lock(target_lock).build();
+        // change cells
         let (dckb_change, dckb_change_data) =
-            { gen_dckb_cell(self.dckb_env.clone(), capacity, tip.number()) };
-        let dckb_capacity: Capacity = dckb_output.capacity().unpack();
+            gen_dckb_cell(self.dckb_env.clone(), change_dckb_amount, tip.number());
+        let change = CellOutput::new_builder()
+            .capacity(change_capacity.pack())
+            .build();
         let dckb_dep = {
             CellDep::new_builder()
                 .out_point(self.dckb_env.dckb_out_point.clone())
@@ -73,25 +94,122 @@ impl DAOBuilder {
                 .build()
         };
         let cell_deps = vec![genesis_info.dao_dep(), dckb_dep];
-        let witnesses = (0..max(inputs.len(), 2))
+        let dckb_lives_cells_with_number: Vec<_> = dckb_live_cells
             .into_iter()
-            .map(|_| Default::default())
-            .collect::<Vec<_>>();
-        let tx = TransactionBuilder::default()
+            .map(|cell| {
+                let tx = rpc_client
+                    .get_transaction(cell.cell.tx_hash.clone())
+                    .unwrap()
+                    .unwrap();
+                let i: u32 = cell.cell.out_point().index().unpack();
+                let data = tx
+                    .transaction
+                    .inner
+                    .outputs_data
+                    .get(i as usize)
+                    .as_ref()
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+                    .into();
+                let (_, mut number) = decode_dckb_data(data);
+                if number == 0 {
+                    number = cell.cell.number;
+                }
+                (cell, number)
+            })
+            .collect();
+        let mut header_deps: Vec<_> = vec![tip.clone()];
+        header_deps.extend(dckb_lives_cells_with_number.iter().map(|(_cell, number)| {
+            let h: HeaderView = rpc_client
+                .get_header_by_number(*number)
+                .unwrap()
+                .unwrap()
+                .into();
+            h
+        }));
+        header_deps.dedup_by_key(|h| h.number());
+        let mut tx = TransactionBuilder::default()
             .inputs(inputs)
             .output(dckb_output)
             .output_data(dckb_output_data.pack())
             .cell_deps(cell_deps)
-            .witnesses(witnesses);
+            .header_deps(header_deps.iter().map(|h| h.hash()))
+            .build();
 
-        if change_capacity > 0 {
-            Ok(tx
+        if change_dckb_amount > 0 {
+            tx = tx
+                .as_advanced_builder()
                 .output(dckb_change)
                 .output_data(dckb_change_data.pack())
-                .build())
-        } else {
-            Ok(tx.build())
+                .build();
         }
+        if change_capacity > 0 {
+            tx = tx
+                .as_advanced_builder()
+                .output(change)
+                .output_data(Default::default())
+                .build();
+        }
+        let mut witnesses = Vec::new();
+        for i in 0..dckb_lives_cells_with_number.len() {
+            let number = dckb_lives_cells_with_number[i].1;
+            let header_index = header_deps
+                .iter()
+                .position(|h| h.number() == number)
+                .unwrap();
+            let input_type = if i == 0 {
+                let align_target_index = header_deps
+                    .iter()
+                    .position(|h| h.number() == tip.number())
+                    .unwrap();
+                Bytes::from(vec![header_index as u8, align_target_index as u8])
+            } else {
+                Bytes::from(vec![header_index as u8])
+            };
+            witnesses.push(
+                WitnessArgs::new_builder()
+                    .input_type(Some(input_type).pack())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+            );
+        }
+        for _i in dckb_lives_cells_with_number.len()..max(tx.inputs().len(), tx.outputs().len()) {
+            witnesses.push(WitnessArgs::default().as_bytes().pack());
+        }
+        let tx = tx.as_advanced_builder().witnesses(witnesses).build();
+        let output_capacity = tx
+            .outputs()
+            .into_iter()
+            .map(|o| {
+                let c: Capacity = o.capacity().unpack();
+                c.as_u64()
+            })
+            .sum::<u64>();
+        let occupied_capacity = tx
+            .outputs()
+            .into_iter()
+            .zip(tx.outputs_data().into_iter())
+            .map(|(o, data)| {
+                let c: Capacity = o
+                    .occupied_capacity(Capacity::bytes(data.len()).unwrap())
+                    .unwrap();
+                c.as_u64()
+            })
+            .sum::<u64>();
+        assert_eq!(input_dckb_amount, dckb_amount + change_dckb_amount);
+        println!("occupied capacity {}", occupied_capacity);
+        println!(
+            "tx inputs capacity {} outputs capacity {}",
+            input_capacity, output_capacity
+        );
+        println!("tx change capacity {} ", change_capacity);
+        println!(
+            "tx inputs capacity - outputs capacity {}",
+            input_capacity - output_capacity
+        );
+        Ok(tx)
     }
 
     pub(crate) fn deposit(&self, deposit_capacity: u64) -> Result<TransactionView, String> {
@@ -127,15 +245,15 @@ impl DAOBuilder {
             .into_iter()
             .map(|_| Default::default())
             .collect::<Vec<_>>();
-        // {
-        //     let secp256k1_script_hash = dckb_output.lock().calc_script_hash();
-        //     let dao_script_hash = output.type_().to_opt().unwrap().calc_script_hash();
-        //     let dckb_script_hash = dckb_output.type_().to_opt().unwrap().calc_script_hash();
-        //     println!("secp256k1: {}", secp256k1_script_hash);
-        //     let raw_dao_script_hash: [u8; 32] = dao_script_hash.unpack();
-        //     println!("dao: {} raw: {:?}", dao_script_hash, raw_dao_script_hash);
-        //     println!("dckb: {}", dckb_script_hash);
-        // }
+        {
+            let secp256k1_script_hash = dckb_output.lock().calc_script_hash();
+            let dao_script_hash = output.type_().to_opt().unwrap().calc_script_hash();
+            let dckb_script_hash = dckb_output.type_().to_opt().unwrap().calc_script_hash();
+            println!("secp256k1: {}", secp256k1_script_hash);
+            let raw_dao_script_hash: [u8; 32] = dao_script_hash.unpack();
+            println!("dao: {} raw: {:?}", dao_script_hash, raw_dao_script_hash);
+            println!("dckb: {}", dckb_script_hash);
+        }
         let tx = TransactionBuilder::default()
             .inputs(inputs)
             .output(output)
@@ -388,6 +506,15 @@ pub fn dckb_script(env: DCKBENV) -> Script {
         .code_hash(code_hash.pack())
         .hash_type(ScriptHashType::Data.into())
         .build()
+}
+fn decode_dckb_data(data: Bytes) -> (u64, u64) {
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&data[0..16]);
+    let dckb = u128::from_le_bytes(buf);
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[16..]);
+    let number = u64::from_le_bytes(buf);
+    (dckb as u64, number)
 }
 
 fn dckb_data(ckb: u128, block_number: u64) -> Bytes {

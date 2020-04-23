@@ -86,22 +86,24 @@ impl<'a> DCKBSubCommand<'a> {
 
     pub fn transfer(
         &mut self,
-        capacity: u64,
+        dckb_amount: u64,
         target_lock: Script,
     ) -> Result<TransactionView, String> {
         self.check_db_ready()?;
         let tx_fee = self.transact_args().tx_fee;
-        let target_capacity = capacity + tx_fee;
-        let (cells, tip) = self.collect_dckb_live_cells(target_capacity)?;
-        let tx = self.build(Default::default()).transfer(
+        let target_capacity = DCKB_CAPACITY + tx_fee;
+        let live_cells = self.collect_sighash_cells(target_capacity)?;
+        let (cells, tip) = self.collect_dckb_live_cells(dckb_amount)?;
+        let tx = self.build(live_cells).transfer(
             self.rpc_client(),
             cells,
             tip,
-            capacity,
+            dckb_amount,
+            target_capacity,
             target_lock,
         )?;
         let output_len = tx.outputs().len();
-        let tx = self.install_sighash_lock(tx, &(0..output_len).collect::<Vec<_>>());
+        let tx = self.install_sighash_lock(tx, &(1..output_len).collect::<Vec<_>>());
         let tx = self.sign(tx, 0)?;
         Ok(tx)
     }
@@ -154,7 +156,10 @@ impl<'a> DCKBSubCommand<'a> {
         let from_address = self.transact_args().address.clone();
         let mut enough = false;
         let mut take_capacity = 0;
+        let mut take_dckb = 0;
         let max_mature_number = get_max_mature_number(self.rpc_client())?;
+        let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
+        let mut client = HttpRpcClient::new(self.rpc_client().url().to_string());
         let terminator = |_, cell: &LiveCellInfo| {
             if !(cell
                 .type_hashes
@@ -166,10 +171,10 @@ impl<'a> DCKBSubCommand<'a> {
                 return (false, false);
             }
 
+            let dckb_cell = load_dckb_data(&mut client, cell.clone(), &tip).unwrap();
             take_capacity += cell.capacity;
-            if take_capacity == target_capacity
-                || take_capacity >= target_capacity + MIN_SECP_CELL_CAPACITY
-            {
+            take_dckb += dckb_cell.dckb_amount;
+            if take_capacity >= MIN_SECP_CELL_CAPACITY && take_dckb >= target_capacity {
                 enough = true;
             }
             (enough, true)
@@ -185,10 +190,9 @@ impl<'a> DCKBSubCommand<'a> {
             })?
         };
         let mut dckb_cells: Vec<DCKBLiveCellInfo> = Vec::with_capacity(cells.len());
-        let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
         let mut capacity = 0;
         for c in cells {
-            let dckb_cell = self.load_dckb_data(c, &tip)?;
+            let dckb_cell = load_dckb_data(self.rpc_client(), c, &tip)?;
             capacity += dckb_cell.dckb_amount;
             dckb_cells.push(dckb_cell);
             if capacity > target_capacity {
@@ -198,8 +202,8 @@ impl<'a> DCKBSubCommand<'a> {
 
         if !enough {
             return Err(format!(
-                "Capacity not enough: {} => {}",
-                from_address, take_capacity,
+                "Capacity not enough: {} => ckb: {} dckb: {}",
+                from_address, take_capacity, take_dckb
             ));
         }
         Ok((dckb_cells, tip))
@@ -214,7 +218,7 @@ impl<'a> DCKBSubCommand<'a> {
         let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
         let mut ret = Vec::with_capacity(dckb_cells.len());
         for cell in dckb_cells {
-            ret.push(self.load_dckb_data(cell, &tip)?);
+            ret.push(load_dckb_data(self.rpc_client(), cell, &tip)?);
         }
         Ok((ret, tip))
     }
@@ -244,65 +248,6 @@ impl<'a> DCKBSubCommand<'a> {
             }
         }
         Ok(ret)
-    }
-
-    fn load_dckb_data(
-        &mut self,
-        cell: LiveCellInfo,
-        tip: &HeaderView,
-    ) -> Result<DCKBLiveCellInfo, String> {
-        const DAO_OCCUPIED_CAPACITY: u64 = 146_00000000;
-
-        fn calculate_dao_capacity(
-            from_header: &HeaderView,
-            to_header: &HeaderView,
-            original_capacity: u64,
-            occupied_capacity: u64,
-        ) -> u64 {
-            let from_ar = {
-                let dao: [u8; 32] = from_header.dao().unpack();
-                let mut buf = [0u8; 8];
-                buf.clone_from_slice(&dao[8..16]);
-                u64::from_le_bytes(buf)
-            };
-            let to_ar = {
-                let dao: [u8; 32] = to_header.dao().unpack();
-                let mut buf = [0u8; 8];
-                buf.clone_from_slice(&dao[8..16]);
-                u64::from_le_bytes(buf)
-            };
-
-            let counted_capacity = original_capacity - occupied_capacity;
-            let withdraw_counted_capacity =
-                (counted_capacity as u128 * to_ar as u128 / from_ar as u128) as u64;
-            withdraw_counted_capacity + occupied_capacity
-        }
-
-        let cell_header: HeaderView = self
-            .rpc_client()
-            .get_header_by_number(cell.number)?
-            .expect("header")
-            .into();
-
-        let tx = self
-            .rpc_client()
-            .get_transaction(cell.tx_hash.clone())?
-            .expect("tx");
-        let data = tx.transaction.inner.outputs_data[cell.index.output_index as usize].as_bytes();
-        let dckb_amount: u64 = {
-            let mut buf = [0u8; 16];
-            buf.copy_from_slice(&data[..16]);
-            u128::from_le_bytes(buf) as u64
-        };
-        let dckb_amount =
-            calculate_dao_capacity(&cell_header, tip, dckb_amount, DAO_OCCUPIED_CAPACITY);
-
-        let dckb_height: u64 = tip.data().raw().number().unpack();
-        Ok(DCKBLiveCellInfo {
-            dckb_amount,
-            dckb_height,
-            cell,
-        })
     }
 
     fn collect_dao_cells(&mut self, lock_hash: Byte32) -> Result<Vec<LiveCellInfo>, String> {
@@ -664,4 +609,63 @@ fn gen_deposit_lock_lock_script(env: DCKBENV, refund_lock_hash: [u8; 32]) -> Scr
         .code_hash(deposit_lock_code_hash.pack())
         .hash_type(ScriptHashType::Data.into())
         .build()
+}
+
+fn load_dckb_data(
+    rpc_client: &mut HttpRpcClient,
+    cell: LiveCellInfo,
+    tip: &HeaderView,
+) -> Result<DCKBLiveCellInfo, String> {
+    const DAO_OCCUPIED_CAPACITY: u64 = 146_00000000;
+
+    fn calculate_dao_capacity(
+        from_header: &HeaderView,
+        to_header: &HeaderView,
+        original_capacity: u64,
+        occupied_capacity: u64,
+    ) -> u64 {
+        let from_ar = {
+            let dao: [u8; 32] = from_header.dao().unpack();
+            let mut buf = [0u8; 8];
+            buf.clone_from_slice(&dao[8..16]);
+            u64::from_le_bytes(buf)
+        };
+        let to_ar = {
+            let dao: [u8; 32] = to_header.dao().unpack();
+            let mut buf = [0u8; 8];
+            buf.clone_from_slice(&dao[8..16]);
+            u64::from_le_bytes(buf)
+        };
+
+        if original_capacity < occupied_capacity {
+            return original_capacity;
+        }
+        let counted_capacity = original_capacity - occupied_capacity;
+        let withdraw_counted_capacity =
+            (counted_capacity as u128 * to_ar as u128 / from_ar as u128) as u64;
+        withdraw_counted_capacity + occupied_capacity
+    }
+
+    let cell_header: HeaderView = rpc_client
+        .get_header_by_number(cell.number)?
+        .expect("header")
+        .into();
+
+    let tx = rpc_client
+        .get_transaction(cell.tx_hash.clone())?
+        .expect("tx");
+    let data = tx.transaction.inner.outputs_data[cell.index.output_index as usize].as_bytes();
+    let dckb_amount: u64 = {
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&data[..16]);
+        u128::from_le_bytes(buf) as u64
+    };
+    let dckb_amount = calculate_dao_capacity(&cell_header, tip, dckb_amount, DAO_OCCUPIED_CAPACITY);
+
+    let dckb_height: u64 = tip.data().raw().number().unpack();
+    Ok(DCKBLiveCellInfo {
+        dckb_amount,
+        dckb_height,
+        cell,
+    })
 }
