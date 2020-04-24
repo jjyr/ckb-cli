@@ -14,7 +14,7 @@ impl DCKBENV {
     pub fn from_network(_network: NetworkType) -> Self {
         let mut tx_hash = [0u8; 32];
         hex_decode(
-            b"ae632d9b8e4beea763c4580c07628df10b70a726b6120460435b4470c751fcec",
+            b"452b2e5046f81b4fc8940292010235e58925594c04536a9a9117447c8d1665d4",
             &mut tx_hash,
         )
         .expect("dehex");
@@ -28,13 +28,13 @@ impl DCKBENV {
             .build();
         let mut dckb_code_hash = [0u8; 32];
         hex_decode(
-            b"63f7b0f104c7c4953763577d1a68e8424fdcad595c670484b006babe214e0e67",
+            b"4eeadcbfc047ad162bcb3ecec312054a686fe11813f9c70ce3915cad1a9fd36f",
             &mut dckb_code_hash,
         )
         .expect("dehex");
         let mut deposit_lock_code_hash = [0u8; 32];
         hex_decode(
-            b"3bb2f58c4e9e23757e7b586039951e1bfc243c9d1a68ec0f787f2448e8f1e1b2",
+            b"ae167e9866128f6489d291007746baffa9ee5fc12f8fde6cde729671313642a5",
             &mut deposit_lock_code_hash,
         )
         .expect("dehex");

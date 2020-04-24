@@ -32,7 +32,10 @@ mod command;
 mod environment;
 mod util;
 
-const DCKB_CAPACITY: u64 = 65_00000000;
+const DCKB_CAPACITY: u64 = 118_00000000;
+const DCKB_DAO_CELL_CAPACITY: u64 = 146_00000000;
+const SECP256K1_CAPACITY: u64 = 61_00000000;
+const PROXY_LOCK_CAPACITY: u64 = 69_00000000;
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct DCKBLiveCellInfo {
@@ -112,20 +115,16 @@ impl<'a> DCKBSubCommand<'a> {
         self.check_db_ready()?;
         let tx_fee = self.transact_args().tx_fee;
         let lock_hash = self.transact_args().lock_hash();
-        let cells = {
-            let mut to_pay_fee = self.collect_sighash_cells(tx_fee)?;
-            let mut to_prepare = {
-                let lock_script =
-                    gen_deposit_lock_lock_script(self.dckb_env.clone(), lock_hash.unpack());
-                let lock_hash = lock_script.calc_script_hash();
-                let deposit_cells = self.query_dao_cells(lock_hash)?;
-                take_by_out_points(deposit_cells, &out_points)?
-            };
-            to_prepare.append(&mut to_pay_fee);
-            to_prepare
+        let mut cells = {
+            let deposit_cells = self.query_dao_cells(lock_hash.clone())?;
+            take_by_out_points(deposit_cells, &out_points)?
         };
-
-        let target_capacity = cells.iter().map(|cell| cell.capacity).sum::<u64>();
+        // destroy dckb
+        let target_capacity =
+            cells.iter().map(|cell| cell.capacity).sum::<u64>() - DCKB_DAO_CELL_CAPACITY;
+        // aapend fee cell
+        let mut to_pay_fee = self.collect_sighash_cells(tx_fee)?;
+        cells.append(&mut to_pay_fee);
         let (dckb_cells, tip_header) = self.collect_dckb_live_cells(target_capacity)?;
         let tx = self
             .build(cells)
@@ -137,15 +136,23 @@ impl<'a> DCKBSubCommand<'a> {
 
     pub fn withdraw(&mut self, out_points: Vec<OutPoint>) -> Result<TransactionView, String> {
         self.check_db_ready()?;
+        let tx_fee = self.transact_args().tx_fee;
         let lock_hash = self.transact_args().lock_hash();
-        let cells = {
-            let prepare_cells = self.query_prepare_cells(lock_hash)?;
-            take_by_out_points(prepare_cells, &out_points)?
+        let mut cells = {
+            let deposit_cells = self.query_prepare_cells(lock_hash.clone())?;
+            take_by_out_points(deposit_cells, &out_points)?
         };
-        let tx = self.build(cells).withdraw(self.rpc_client())?;
-        let output_len = tx.outputs().len();
-        let tx = self.install_sighash_lock(tx, &(0..output_len).collect::<Vec<_>>());
-        self.sign(tx, 1)
+        // destroy dckb
+        let target_capacity = cells.iter().map(|cell| cell.capacity).sum::<u64>();
+        // aapend fee cell
+        let mut to_pay_fee = self.collect_sighash_cells(tx_fee)?;
+        cells.append(&mut to_pay_fee);
+        let (dckb_cells, tip_header) = self.collect_dckb_live_cells(target_capacity)?;
+        // let tx = self.build(cells).withdraw(self.rpc_client(), dckb_cells, tip_header)?;
+        // let output_len = tx.outputs().len();
+        // let tx = self.install_sighash_lock(tx, &(0..output_len).collect::<Vec<_>>());
+        // self.sign(tx, 1)
+        Ok(unreachable!())
     }
 
     fn collect_dckb_live_cells(
@@ -202,8 +209,8 @@ impl<'a> DCKBSubCommand<'a> {
 
         if !enough {
             return Err(format!(
-                "Capacity not enough: {} => ckb: {} dckb: {}",
-                from_address, take_capacity, take_dckb
+                "Capacity not enough: {} => ckb: {}({}) dckb: {}({})",
+                from_address, take_capacity, MIN_SECP_CELL_CAPACITY, take_dckb, target_capacity
             ));
         }
         Ok((dckb_cells, tip))
@@ -646,21 +653,31 @@ fn load_dckb_data(
         withdraw_counted_capacity + occupied_capacity
     }
 
-    let cell_header: HeaderView = rpc_client
-        .get_header_by_number(cell.number)?
-        .expect("header")
-        .into();
-
     let tx = rpc_client
         .get_transaction(cell.tx_hash.clone())?
         .expect("tx");
     let data = tx.transaction.inner.outputs_data[cell.index.output_index as usize].as_bytes();
-    let dckb_amount: u64 = {
+    let (dckb_amount, dckb_number) = {
         let mut buf = [0u8; 16];
         buf.copy_from_slice(&data[..16]);
-        u128::from_le_bytes(buf) as u64
+        let dckb_amount = u128::from_le_bytes(buf) as u64;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&data[16..]);
+        let dckb_number = u64::from_le_bytes(buf);
+        (dckb_amount, dckb_number)
     };
-    let dckb_amount = calculate_dao_capacity(&cell_header, tip, dckb_amount, DAO_OCCUPIED_CAPACITY);
+    let cell_header: HeaderView = if dckb_number == 0 {
+        rpc_client
+            .get_header_by_number(cell.number)?
+            .expect("header")
+            .into()
+    } else {
+        rpc_client
+            .get_header_by_number(dckb_number)?
+            .expect("header")
+            .into()
+    };
+    let dckb_amount = calculate_dao_capacity(&cell_header, tip, dckb_amount, 0);
 
     let dckb_height: u64 = tip.data().raw().number().unpack();
     Ok(DCKBLiveCellInfo {

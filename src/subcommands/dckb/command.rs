@@ -45,7 +45,7 @@ impl<'a> CliSubCommand for DCKBSubCommand<'a> {
                 let transaction = self.transfer(capacity, target_lock)?;
                 send_transaction(self.rpc_client(), transaction, format, color, debug)
             }
-            ("prepare-withdraw", Some(m)) => {
+            ("prepare", Some(m)) => {
                 self.transact_args = Some(TransactArgs::from_matches(m, network_type)?);
                 let out_points = OutPointParser.from_matches_vec(m, "out-point")?;
                 if out_points.len() != out_points.iter().collect::<HashSet<_>>().len() {
