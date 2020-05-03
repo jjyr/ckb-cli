@@ -13,6 +13,43 @@ use ckb_types::{
     prelude::*,
 };
 
+pub(crate) fn calculate_dao_maximum_withdraw_with_header(
+    rpc_client: &mut HttpRpcClient,
+    cell: &LiveCellInfo,
+    prepare_header: &HeaderView,
+) -> Result<u64, String> {
+    let deposit_header: HeaderView = rpc_client
+        .get_header_by_number(cell.number)?
+        .expect("header")
+        .into();
+    let tx = {
+        let tx: packed::Transaction = rpc_client
+            .get_transaction(cell.tx_hash.clone())?
+            .expect("tx")
+            .transaction
+            .inner
+            .into();
+        tx.into_view()
+    };
+    let (output, output_data) = {
+        tx.output_with_data(cell.index.output_index as usize)
+            .ok_or_else(|| "invalid deposit out_point, the cell is not found".to_string())?
+    };
+
+    // Calculate maximum withdraw of the deposited_output
+    //
+    // NOTE: It is safe to use `unwrap` for the data we fetch from ckb node.
+    let occupied_capacity = output
+        .occupied_capacity(Capacity::bytes(output_data.len()).unwrap())
+        .unwrap();
+    Ok(calculate_dao_maximum_withdraw4(
+        &deposit_header,
+        &prepare_header,
+        &output,
+        occupied_capacity.as_u64(),
+    ))
+}
+
 pub(crate) fn calculate_dao_maximum_withdraw(
     rpc_client: &mut HttpRpcClient,
     prepare_cell: &LiveCellInfo,
@@ -85,6 +122,12 @@ pub(crate) fn calculate_dao_maximum_withdraw4(
     let (deposit_ar, _, _, _) = extract_dao_data(deposit_header.dao()).unwrap();
     let (prepare_ar, _, _, _) = extract_dao_data(prepare_header.dao()).unwrap();
     let output_capacity: Capacity = output.capacity().unpack();
+    dbg!(
+        deposit_header.number(),
+        prepare_header.number(),
+        output_capacity,
+        occupied_capacity
+    );
     let counted_capacity = output_capacity.as_u64() - occupied_capacity;
     let withdraw_counted_capacity =
         u128::from(counted_capacity) * u128::from(prepare_ar) / u128::from(deposit_ar);

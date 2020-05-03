@@ -1,4 +1,6 @@
-use crate::subcommands::dckb::util::{calculate_dao_maximum_withdraw, send_transaction};
+use crate::subcommands::dckb::util::{
+    calculate_dao_maximum_withdraw, calculate_dao_maximum_withdraw_with_header, send_transaction,
+};
 use crate::subcommands::{CliSubCommand, DCKBSubCommand};
 use crate::utils::{
     arg,
@@ -12,6 +14,7 @@ use crate::utils::{
 use ckb_crypto::secp::SECP256K1;
 use ckb_sdk::{constants::SIGHASH_TYPE_HASH, Address, AddressPayload, NetworkType};
 use ckb_types::{
+    core::HeaderView,
     packed::{Byte32, Script},
     prelude::*,
     H160, H256,
@@ -85,10 +88,26 @@ impl<'a> CliSubCommand for DCKBSubCommand<'a> {
                 let lock_hash = query_args.lock_hash;
                 let cells = self.query_dao_cells(lock_hash)?;
                 let total_capacity = cells.iter().map(|live| live.capacity).sum::<u64>();
+                // let maximum_withdraws: Vec<_> = cells
+                //     .iter()
+                //     .map(|cell| calculate_dao_maximum_withdraw(self.rpc_client(), cell))
+                //     .collect::<Result<Vec<u64>, String>>()?;
+                let tip: HeaderView = self.rpc_client.get_tip_header()?.into();
+                let maximum_withdraws: Vec<_> = cells
+                    .iter()
+                    .map(|cell| {
+                        calculate_dao_maximum_withdraw_with_header(self.rpc_client(), cell, &tip)
+                    })
+                    .collect::<Result<Vec<u64>, String>>()?;
+                let total_maximum_withdraw = maximum_withdraws.iter().sum::<u64>();
                 let resp = serde_json::json!({
-                    "cells": cells.into_iter().map(|info| {
-                        serde_json::to_value(&info).unwrap()
+                    "live_cells": (0..cells.len()).map(|i| {
+                        let mut value = serde_json::to_value(&cells[i]).unwrap();
+                        let obj = value.as_object_mut().unwrap();
+                        obj.insert("maximum_withdraw".to_owned(), serde_json::json!(maximum_withdraws[i]));
+                        value
                     }).collect::<Vec<_>>(),
+                    "total_maximum_withdraw": total_maximum_withdraw,
                     "total_capacity": total_capacity,
                 });
                 Ok(resp.render(format, color))

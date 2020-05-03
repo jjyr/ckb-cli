@@ -4,17 +4,19 @@ use faster_hex::hex_decode;
 
 #[derive(Debug, Clone)]
 pub struct DCKBENV {
-    pub deposit_lock_out_point: OutPoint,
-    pub deposit_lock_code_hash: [u8; 32],
+    pub dao_lock_out_point: OutPoint,
+    pub dao_lock_code_hash: [u8; 32],
     pub dckb_out_point: OutPoint,
     pub dckb_code_hash: [u8; 32],
+    pub custodian_lock_out_point: OutPoint,
+    pub custodian_lock_code_hash: [u8; 32],
 }
 
 impl DCKBENV {
     pub fn from_network(_network: NetworkType) -> Self {
         let mut tx_hash = [0u8; 32];
         hex_decode(
-            b"452b2e5046f81b4fc8940292010235e58925594c04536a9a9117447c8d1665d4",
+            b"5f2615f31e5c15e037e23a51e173a4c9856caa65a41301269fa12b33a9d58896",
             &mut tx_hash,
         )
         .expect("dehex");
@@ -22,27 +24,39 @@ impl DCKBENV {
             .tx_hash(tx_hash.pack())
             .index(0u32.pack())
             .build();
-        let deposit_lock_out_point = OutPoint::new_builder()
+        let dao_lock_out_point = OutPoint::new_builder()
             .tx_hash(tx_hash.pack())
             .index(1u32.pack())
             .build();
+        let custodian_lock_out_point = OutPoint::new_builder()
+            .tx_hash(tx_hash.pack())
+            .index(2u32.pack())
+            .build();
         let mut dckb_code_hash = [0u8; 32];
         hex_decode(
-            b"4eeadcbfc047ad162bcb3ecec312054a686fe11813f9c70ce3915cad1a9fd36f",
+            b"501fd8267f7448eda4f8b1d0245174c7fc163c1b2f149346abc097b319a1c624",
             &mut dckb_code_hash,
         )
         .expect("dehex");
-        let mut deposit_lock_code_hash = [0u8; 32];
+        let mut dao_lock_code_hash = [0u8; 32];
         hex_decode(
-            b"ae167e9866128f6489d291007746baffa9ee5fc12f8fde6cde729671313642a5",
-            &mut deposit_lock_code_hash,
+            b"6e7cc0db0b2e932b2450a689017c96d06ae6ed08b6b7c60e92f8f52e72bb3219",
+            &mut dao_lock_code_hash,
+        )
+        .expect("dehex");
+        let mut custodian_lock_code_hash = [0u8; 32];
+        hex_decode(
+            b"1877350a85ab2325ef4b9eaabf54782561ad6a5b6cd206e57a8d478b430d81dd",
+            &mut custodian_lock_code_hash,
         )
         .expect("dehex");
         DCKBENV {
-            deposit_lock_out_point,
-            deposit_lock_code_hash,
+            dao_lock_out_point,
+            dao_lock_code_hash,
             dckb_out_point,
             dckb_code_hash,
+            custodian_lock_out_point,
+            custodian_lock_code_hash,
         }
     }
 }

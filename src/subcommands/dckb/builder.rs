@@ -1,7 +1,7 @@
 use super::environment::DCKBENV;
 use super::util::minimal_unlock_point;
 use super::{
-    DCKBLiveCellInfo, DCKB_CAPACITY, DCKB_DAO_CELL_CAPACITY, PROXY_LOCK_CAPACITY,
+    DCKBLiveCellInfo, CUSTODIAN_CELL_CAPACITY, DCKB_CAPACITY, DCKB_DAO_CELL_CAPACITY,
     SECP256K1_CAPACITY,
 };
 use crate::subcommands::dckb::util::calculate_dao_maximum_withdraw4;
@@ -241,10 +241,10 @@ impl DAOBuilder {
                 change_cells.push(cell.clone());
             }
         }
-        let dckb_destroy_target =
+        let custodian_dckb_amount =
             deposit_cells.iter().map(|cell| cell.capacity).sum::<u64>() - DCKB_DAO_CELL_CAPACITY;
         let dckb_capacity = dckb_cells.iter().map(|cell| cell.dckb_amount).sum::<u64>();
-        let dckb_change_capacity = dckb_capacity - dckb_destroy_target;
+        let dckb_change_capacity = dckb_capacity - custodian_dckb_amount;
         let deposit_txo_headers = {
             let deposit_out_points = deposit_cells
                 .iter()
@@ -280,18 +280,16 @@ impl DAOBuilder {
             .outputs_data(outputs_data)
             .build();
 
-        let proxy_lock_cell = CellOutput::new_builder()
-            .capacity(PROXY_LOCK_CAPACITY.pack())
+        let custodian_cell = CellOutput::new_builder()
+            .capacity(CUSTODIAN_CELL_CAPACITY.pack())
+            .type_(Some(dckb_script(self.dckb_env.clone())).pack())
             .build();
-        let proxy_lock_data: Bytes = {
-            let deposit_lock_script_hash: [u8; 32] = self.live_cells[0].lock_hash.clone().into();
-            deposit_lock_script_hash[..8].to_vec().into()
-        };
+        let custodian_cell_data: Bytes = dckb_data(custodian_dckb_amount.into(), tip.number());
 
         let change_capacity = change_cells.iter().map(|txo| txo.capacity).sum::<u64>()
             - self.tx_fee
             - DCKB_CAPACITY
-            - PROXY_LOCK_CAPACITY
+            - CUSTODIAN_CELL_CAPACITY
             - SECP256K1_CAPACITY;
         let change = CellOutput::new_builder()
             .capacity(change_capacity.pack())
@@ -307,12 +305,13 @@ impl DAOBuilder {
         header_deps.push(tip.clone());
         header_deps.dedup_by_key(|h| h.hash());
 
-        let lock_proxy_cell_index: u8 = tx.outputs().len() as u8;
+        // custodian cell is last cell
+        let custodian_cell_index: u8 = (tx.outputs().len() - 1 + 3) as u8;
         let dckb_witnesses =
             build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &tip);
         let mut witnesses = vec![WitnessArgs::default()
             .as_builder()
-            .lock(Some(Bytes::from(vec![lock_proxy_cell_index])).pack())
+            .lock(Some(Bytes::from(vec![custodian_cell_index])).pack())
             .build()
             .as_bytes()
             .pack()];
@@ -325,18 +324,19 @@ impl DAOBuilder {
 
         let tx = tx
             .as_advanced_builder()
-            .output(proxy_lock_cell)
-            .output_data(proxy_lock_data.pack())
             .output(change)
             .output_data(Default::default())
             .output(dckb_change)
             .output_data(dckb_change_data.pack())
+            .output(custodian_cell)
+            .output_data(custodian_cell_data.pack())
             .header_deps(header_deps.into_iter().map(|h| h.hash()))
             .witnesses(witnesses)
             .build();
+        debug_assert_eq!(custodian_cell_index as usize, tx.outputs().len() - 1);
         println!(
-            "input dckb {} change dckb {}",
-            dckb_capacity, dckb_change_capacity
+            "input dckb {} change dckb {} custodian dckb {}",
+            dckb_capacity, dckb_change_capacity, custodian_dckb_amount
         );
         Ok(tx)
     }
@@ -481,7 +481,7 @@ impl DAOBuilder {
 
     fn deposit_lock_dep(&self) -> CellDep {
         CellDep::new_builder()
-            .out_point(self.dckb_env.deposit_lock_out_point.clone())
+            .out_point(self.dckb_env.dao_lock_out_point.clone())
             .dep_type(ScriptHashType::Data.into())
             .build()
     }
