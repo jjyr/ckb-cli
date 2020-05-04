@@ -122,12 +122,6 @@ pub(crate) fn calculate_dao_maximum_withdraw4(
     let (deposit_ar, _, _, _) = extract_dao_data(deposit_header.dao()).unwrap();
     let (prepare_ar, _, _, _) = extract_dao_data(prepare_header.dao()).unwrap();
     let output_capacity: Capacity = output.capacity().unpack();
-    dbg!(
-        deposit_header.number(),
-        prepare_header.number(),
-        output_capacity,
-        occupied_capacity
-    );
     let counted_capacity = output_capacity.as_u64() - occupied_capacity;
     let withdraw_counted_capacity =
         u128::from(counted_capacity) * u128::from(prepare_ar) / u128::from(deposit_ar);

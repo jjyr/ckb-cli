@@ -596,7 +596,7 @@ pub struct LiveCellInfo {
 
 impl LiveCellInfo {
     pub fn out_point(&self) -> OutPoint {
-        OutPoint::new(self.tx_hash.clone().pack(), self.tx_index)
+        OutPoint::new(self.tx_hash.clone().pack(), self.index.output_index)
     }
     pub fn input(&self) -> CellInput {
         CellInput::new(self.out_point(), 0)

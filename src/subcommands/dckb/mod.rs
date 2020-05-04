@@ -8,7 +8,7 @@ use crate::utils::other::{
 };
 use byteorder::{ByteOrder, LittleEndian};
 use ckb_hash::new_blake2b;
-use ckb_index::{with_index_db, IndexDatabase, LiveCellInfo};
+use ckb_index::{with_index_db, CellIndex, IndexDatabase, LiveCellInfo};
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::{
     constants::{MIN_SECP_CELL_CAPACITY, SIGHASH_TYPE_HASH},
@@ -84,7 +84,8 @@ impl<'a> DCKBSubCommand<'a> {
         let tx = self.install_dao_lock(tx, &[0]);
         let output_len = tx.outputs().len();
         let tx = self.install_sighash_lock(tx, &(1..output_len).collect::<Vec<_>>());
-        let tx = self.sign(tx, 0)?;
+        let len = tx.witnesses().len();
+        let tx = self.sign(tx, 0, len)?;
         Ok(tx)
     }
 
@@ -97,7 +98,8 @@ impl<'a> DCKBSubCommand<'a> {
         let tx_fee = self.transact_args().tx_fee;
         let target_capacity = DCKB_CAPACITY + tx_fee;
         let live_cells = self.collect_sighash_cells(target_capacity)?;
-        let (cells, tip) = self.collect_dckb_live_cells(dckb_amount)?;
+        let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
+        let cells = self.collect_dckb_live_cells(dckb_amount, &tip)?;
         let tx = self.build(live_cells).transfer(
             self.rpc_client(),
             cells,
@@ -108,7 +110,8 @@ impl<'a> DCKBSubCommand<'a> {
         )?;
         let output_len = tx.outputs().len();
         let tx = self.install_sighash_lock(tx, &(1..output_len).collect::<Vec<_>>());
-        let tx = self.sign(tx, 0)?;
+        let len = tx.witnesses().len();
+        let tx = self.sign(tx, 0, len)?;
         Ok(tx)
     }
 
@@ -127,14 +130,16 @@ impl<'a> DCKBSubCommand<'a> {
         let extra_capacity = tx_fee + DCKB_CAPACITY + CUSTODIAN_CELL_CAPACITY + SECP256K1_CAPACITY;
         let mut to_pay_fee = self.collect_sighash_cells(extra_capacity)?;
         cells.append(&mut to_pay_fee);
-        let (dckb_cells, tip_header) = self.collect_dckb_live_cells(target_capacity)?;
+        let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
+        let dckb_cells = self.collect_dckb_live_cells(target_capacity, &tip)?;
         let tx = self
             .build(cells)
-            .prepare(self.rpc_client(), dckb_cells, tip_header)?;
+            .prepare(self.rpc_client(), dckb_cells, tip)?;
         let output_len = tx.outputs().len();
         let tx = self.install_custodian_lock(tx, &[(output_len - 1) as usize]);
         let tx = self.install_sighash_lock(tx, &(1..(output_len - 1)).collect::<Vec<_>>());
-        self.sign(tx, 1)
+        let len = tx.witnesses().len();
+        self.sign(tx, 1, len)
     }
 
     pub fn withdraw(&mut self, out_points: Vec<OutPoint>) -> Result<TransactionView, String> {
@@ -145,38 +150,109 @@ impl<'a> DCKBSubCommand<'a> {
             let deposit_cells = self.query_prepare_cells(lock_hash.clone())?;
             take_by_out_points(deposit_cells, &out_points)?
         };
+        let (custodian_cell, prepare_header) = {
+            let tx_hash = out_points[0].tx_hash();
+            let tx = self
+                .rpc_client()
+                .get_transaction(tx_hash.unpack())?
+                .expect("tx");
+            let (index, _) = tx
+                .transaction
+                .inner
+                .outputs
+                .iter()
+                .enumerate()
+                .find(|(_i, output)| {
+                    output.lock.code_hash == self.dckb_env.custodian_lock_code_hash.into()
+                })
+                .expect("find custodian cell");
+            let data = tx.transaction.inner.outputs_data[index].as_bytes();
+            let output = tx.transaction.inner.outputs[index].clone();
+            debug_assert_eq!(data.len(), 24);
+            let dckb_amount = {
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&data[..16]);
+                u128::from_le_bytes(buf) as u64
+            };
+            let dckb_height = {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&data[16..]);
+                u64::from_le_bytes(buf)
+            };
+            let prepare_header: HeaderView = self
+                .rpc_client()
+                .get_header(tx.tx_status.block_hash.unwrap())?
+                .expect("get prepare header")
+                .into();
+            // TODO query from ckb-cli?
+            let cell = DCKBLiveCellInfo {
+                dckb_height,
+                dckb_amount,
+                cell: LiveCellInfo {
+                    tx_hash: tx_hash.unpack(),
+                    tx_index: 0,
+                    index: CellIndex {
+                        tx_index: 0,
+                        output_index: index as u32,
+                    },
+                    capacity: output.capacity.0,
+                    data_bytes: data.len() as u64,
+                    lock_hash: output.lock.code_hash,
+                    number: prepare_header.number(),
+                    type_hashes: None,
+                },
+            };
+            (cell, prepare_header)
+        };
         // destroy dckb
-        let target_destroy_dckb = cells
-            .iter()
-            .map(|cell| {
-                let maximum_withdraw_capacity =
+        let required_dckb = {
+            let withdraw_capacity = cells
+                .iter()
+                .map(|cell| {
                     calculate_dao_maximum_withdraw(self.rpc_client(), cell)
-                        .expect("withdraw capacity");
-                maximum_withdraw_capacity - cell.capacity
-            })
-            .sum::<u64>();
-        // aapend fee cell
+                        .expect("withdraw capacity")
+                })
+                .sum::<u64>();
+            let from_header: HeaderView = self
+                .rpc_client()
+                .get_header_by_number(custodian_cell.dckb_height)?
+                .expect("get from")
+                .into();
+            let custodian_dckb_amount = calculate_dao_capacity(
+                &from_header,
+                &prepare_header,
+                custodian_cell.dckb_amount,
+                0,
+            );
+            withdraw_capacity - DCKB_DAO_CELL_CAPACITY - custodian_dckb_amount
+        };
+        // append fee cell
         let mut to_pay_fee = self.collect_sighash_cells(tx_fee)?;
         cells.append(&mut to_pay_fee);
-        let (dckb_cells, tip_header) = self.collect_dckb_live_cells(target_destroy_dckb)?;
-        // let tx = self.build(cells).withdraw(self.rpc_client(), dckb_cells, tip_header)?;
-        // let output_len = tx.outputs().len();
-        // let tx = self.install_sighash_lock(tx, &(0..output_len).collect::<Vec<_>>());
-        // self.sign(tx, 1)
-        Ok(unreachable!())
+        let dckb_cells = self.collect_dckb_live_cells(required_dckb, &prepare_header)?;
+        let tx = self.build(cells).withdraw(
+            self.rpc_client(),
+            custodian_cell,
+            dckb_cells,
+            prepare_header,
+        )?;
+        let output_len = tx.outputs().len();
+        let tx = self.install_sighash_lock(tx, &(0..output_len).collect::<Vec<_>>());
+        let len = tx.inputs().len() - 2;
+        self.sign(tx, 1, len)
     }
 
     fn collect_dckb_live_cells(
         &mut self,
         target_capacity: u64,
-    ) -> Result<(Vec<DCKBLiveCellInfo>, HeaderView), String> {
+        tip: &HeaderView,
+    ) -> Result<Vec<DCKBLiveCellInfo>, String> {
         let dckb_script_hash: H256 = self.dckb_type_hash().unpack();
         let from_address = self.transact_args().address.clone();
         let mut enough = false;
         let mut take_capacity = 0;
         let mut take_dckb = 0;
         let max_mature_number = get_max_mature_number(self.rpc_client())?;
-        let tip: HeaderView = self.rpc_client().get_tip_header()?.into();
         let mut client = HttpRpcClient::new(self.rpc_client().url().to_string());
         let terminator = |_, cell: &LiveCellInfo| {
             if !(cell
@@ -224,7 +300,7 @@ impl<'a> DCKBSubCommand<'a> {
                 from_address, take_capacity, MIN_SECP_CELL_CAPACITY, capacity, target_capacity
             ));
         }
-        Ok((dckb_cells, tip))
+        Ok(dckb_cells)
     }
 
     pub fn query_dckb_cells(
@@ -340,7 +416,7 @@ impl<'a> DCKBSubCommand<'a> {
         if !enough {
             return Err(format!(
                 "Capacity not enough: {} => {}({})",
-                from_address, target_capacity, take_capacity,
+                from_address, take_capacity, target_capacity,
             ));
         }
         Ok(cells)
@@ -360,8 +436,9 @@ impl<'a> DCKBSubCommand<'a> {
         &mut self,
         transaction: TransactionView,
         sig_index: usize,
+        len: usize,
     ) -> Result<TransactionView, String> {
-        let transaction = self.install_sighash_witness(transaction, sig_index)?;
+        let transaction = self.install_sighash_witness(transaction, sig_index, len)?;
         Ok(transaction)
     }
 
@@ -488,11 +565,17 @@ impl<'a> DCKBSubCommand<'a> {
         &self,
         transaction: TransactionView,
         sig_index: usize,
+        len: usize,
     ) -> Result<TransactionView, String> {
         for output in transaction.outputs().into_iter() {
             assert!(!output.lock().args().is_empty());
         }
-        for witness in transaction.witnesses() {
+        for witness in transaction
+            .witnesses()
+            .into_iter()
+            .skip(sig_index)
+            .take(len)
+        {
             if let Ok(w) = WitnessArgs::from_slice(witness.as_slice()) {
                 assert!(w.lock().is_none());
             }
@@ -501,6 +584,8 @@ impl<'a> DCKBSubCommand<'a> {
         let mut witnesses = transaction
             .witnesses()
             .into_iter()
+            .skip(sig_index)
+            .take(len)
             .map(|w| w.unpack())
             .collect::<Vec<Bytes>>();
         let init_witness = {
@@ -519,7 +604,7 @@ impl<'a> DCKBSubCommand<'a> {
             blake2b.update(&transaction.hash().raw_data());
             blake2b.update(&(init_witness.as_bytes().len() as u64).to_le_bytes());
             blake2b.update(&init_witness.as_bytes());
-            for other_witness in witnesses.iter().skip(sig_index + 1) {
+            for other_witness in witnesses.iter().skip(1) {
                 blake2b.update(&(other_witness.len() as u64).to_le_bytes());
                 blake2b.update(&other_witness);
             }
@@ -546,6 +631,7 @@ impl<'a> DCKBSubCommand<'a> {
             .lock(Some(Bytes::from(signature[..].to_vec())).pack())
             .build()
             .as_bytes();
+        debug_assert_eq!(witnesses.len(), len);
 
         Ok(transaction
             .as_advanced_builder()
@@ -684,12 +770,6 @@ fn calculate_dao_capacity(
     original_capacity: u64,
     occupied_capacity: u64,
 ) -> u64 {
-    dbg!(
-        from_header.number(),
-        to_header.number(),
-        original_capacity,
-        occupied_capacity
-    );
     let from_ar = {
         let dao: [u8; 32] = from_header.dao().unpack();
         let mut buf = [0u8; 8];

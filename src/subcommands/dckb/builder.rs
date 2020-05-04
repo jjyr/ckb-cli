@@ -143,16 +143,6 @@ impl DAOBuilder {
             })
             .sum::<u64>();
         assert_eq!(input_dckb_amount, dckb_amount + change_dckb_amount);
-        println!("occupied capacity {}", occupied_capacity);
-        println!(
-            "tx inputs capacity {} outputs capacity {}",
-            input_capacity, output_capacity
-        );
-        println!("tx change capacity {} ", change_capacity);
-        println!(
-            "tx inputs capacity - outputs capacity {}",
-            input_capacity - output_capacity
-        );
         Ok(tx)
     }
 
@@ -187,15 +177,15 @@ impl DAOBuilder {
             .into_iter()
             .map(|_| Default::default())
             .collect::<Vec<_>>();
-        {
-            let secp256k1_script_hash = dckb_output.lock().calc_script_hash();
-            let dao_script_hash = output.type_().to_opt().unwrap().calc_script_hash();
-            let dckb_script_hash = dckb_output.type_().to_opt().unwrap().calc_script_hash();
-            println!("secp256k1: {}", secp256k1_script_hash);
-            let raw_dao_script_hash: [u8; 32] = dao_script_hash.unpack();
-            println!("dao: {} raw: {:?}", dao_script_hash, raw_dao_script_hash);
-            println!("dckb: {}", dckb_script_hash);
-        }
+        // {
+        //     let secp256k1_script_hash = dckb_output.lock().calc_script_hash();
+        //     let dao_script_hash = output.type_().to_opt().unwrap().calc_script_hash();
+        //     let dckb_script_hash = dckb_output.type_().to_opt().unwrap().calc_script_hash();
+        //     println!("secp256k1: {}", secp256k1_script_hash);
+        //     let raw_dao_script_hash: [u8; 32] = dao_script_hash.unpack();
+        //     println!("dao: {} raw: {:?}", dao_script_hash, raw_dao_script_hash);
+        //     println!("dckb: {}", dckb_script_hash);
+        // }
         let tx = TransactionBuilder::default()
             .inputs(inputs)
             .output(output)
@@ -334,16 +324,19 @@ impl DAOBuilder {
             .witnesses(witnesses)
             .build();
         debug_assert_eq!(custodian_cell_index as usize, tx.outputs().len() - 1);
-        println!(
-            "input dckb {} change dckb {} custodian dckb {}",
-            dckb_capacity, dckb_change_capacity, custodian_dckb_amount
-        );
+        // println!(
+        //     "input dckb {} change dckb {} custodian dckb {}",
+        //     dckb_capacity, dckb_change_capacity, custodian_dckb_amount
+        // );
         Ok(tx)
     }
 
     pub(crate) fn withdraw(
         &self,
         rpc_client: &mut HttpRpcClient,
+        custodian_cell: DCKBLiveCellInfo,
+        mut dckb_cells: Vec<DCKBLiveCellInfo>,
+        tip: HeaderView,
     ) -> Result<TransactionView, String> {
         let genesis_info = &self.genesis_info;
         let prepare_txo_headers = {
@@ -375,7 +368,7 @@ impl DAOBuilder {
             self.txo_headers(rpc_client, deposit_out_points)?
         };
 
-        let inputs = deposit_txo_headers
+        let mut inputs: Vec<_> = deposit_txo_headers
             .iter()
             .zip(prepare_txo_headers.iter())
             .map(|((_, _, deposit_header), (out_point, _, prepare_header))| {
@@ -386,7 +379,14 @@ impl DAOBuilder {
                     false,
                 );
                 CellInput::new(out_point.clone(), since.value())
-            });
+            })
+            .collect();
+        let unlock_input_index = inputs.len();
+        // input dckb cells
+        inputs.extend(dckb_cells.iter().map(|cell| cell.cell.input()));
+        // input custodian cell
+        let custodian_cell_index = inputs.len();
+        inputs.push(CellInput::new(custodian_cell.cell.out_point(), 0));
         let total_capacity = deposit_txo_headers
             .iter()
             .zip(prepare_txo_headers.iter())
@@ -408,32 +408,50 @@ impl DAOBuilder {
             .capacity(output_capacity.pack())
             .build();
         let cell_deps = vec![genesis_info.dao_dep()];
-        let header_deps = deposit_txo_headers
+        dckb_cells.push(custodian_cell);
+        let (dckb_cells_with_number, mut header_deps) = dckb_cell_deps(rpc_client, dckb_cells);
+        {
+            let header_deps_iter = deposit_txo_headers
+                .iter()
+                .chain(prepare_txo_headers.iter())
+                .map(|(_, _, header)| header.clone());
+            header_deps.extend(header_deps_iter);
+        }
+        header_deps.push(tip.clone());
+        header_deps.dedup_by_key(|h| h.hash());
+        let mut witnesses = deposit_txo_headers
             .iter()
-            .chain(prepare_txo_headers.iter())
-            .map(|(_, _, header)| header.hash())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let witnesses = deposit_txo_headers
-            .iter()
-            .map(|(_, _, header)| {
+            .enumerate()
+            .map(|(i, (_, _, header))| {
                 let index = header_deps
                     .iter()
-                    .position(|hash| hash == &header.hash())
+                    .position(|header| header.hash() == header.hash())
                     .unwrap() as u64;
-                WitnessArgs::new_builder()
-                    .input_type(Some(Bytes::from(index.to_le_bytes().to_vec())).pack())
-                    .build()
-                    .as_bytes()
-                    .pack()
+                let mut witness_args = WitnessArgs::new_builder()
+                    .input_type(Some(Bytes::from(index.to_le_bytes().to_vec())).pack());
+                if i == 0 {
+                    witness_args = witness_args
+                        .lock(Some(Bytes::from(vec![custodian_cell_index as u8])).pack());
+                }
+                witness_args.build().as_bytes().pack()
             })
             .collect::<Vec<_>>();
+        let mut dckb_witnesses =
+            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &tip);
+        // rewrite custodian witness
+        let custodian_witness_index = dckb_witnesses.len() - 1;
+        let custodian_witness =
+            WitnessArgs::new_unchecked(dckb_witnesses[custodian_witness_index].unpack())
+                .as_builder()
+                .lock(Some(Bytes::from(vec![unlock_input_index as u8])).pack())
+                .build();
+        dckb_witnesses[custodian_witness_index] = custodian_witness.as_bytes().pack();
+        witnesses.extend(dckb_witnesses.into_iter());
         Ok(TransactionBuilder::default()
             .inputs(inputs)
             .output(output)
             .cell_deps(cell_deps)
-            .header_deps(header_deps)
+            .header_deps(header_deps.into_iter().map(|h| h.hash()))
             .witnesses(witnesses)
             .output_data(Default::default())
             .build())
