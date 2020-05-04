@@ -152,7 +152,7 @@ impl<'a> DCKBSubCommand<'a> {
                     .arg(arg::capacity().required(true))
                     .arg(arg::to_address().required(true)),
                 SubCommand::with_name("prepare")
-                    .about("Perform phase 1 withdraw from NervosDAO (destroy deposited amount DCKB), WARN: make sure you can perform phase2 withdraw within 18 epochs(~ 3 days), otherwise your coin will lose")
+                    .about("Perform phase 1 withdraw from NervosDAO (destroy deposited amount DCKB), WARN: make sure you can perform phase2 withdraw within 42 epochs(~ 7 days), otherwise your coin will lose")
                     .args(&TransactArgs::args())
                     .arg(arg::out_point().required(true).multiple(true)),
                 SubCommand::with_name("withdraw")
