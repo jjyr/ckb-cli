@@ -247,10 +247,6 @@ impl TransactArgs {
         H160::from_slice(self.address.payload().args().as_ref()).unwrap()
     }
 
-    pub(crate) fn lock_script(&self) -> Script {
-        Script::from(self.address.payload())
-    }
-
     pub(crate) fn lock_hash(&self) -> Byte32 {
         Script::from(self.address.payload()).calc_script_hash()
     }

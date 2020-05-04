@@ -1,3 +1,4 @@
+use super::DCKBLiveCellInfo;
 use crate::utils::{
     other::check_lack_of_capacity,
     printer::{OutputFormat, Printable},
@@ -258,4 +259,99 @@ mod tests {
         );
         assert_eq!(result, 100_000_000_009_999);
     }
+}
+
+pub fn calculate_dao_capacity(
+    from_header: &HeaderView,
+    to_header: &HeaderView,
+    original_capacity: u64,
+    occupied_capacity: u64,
+) -> u64 {
+    let from_ar = {
+        let dao: [u8; 32] = from_header.dao().unpack();
+        let mut buf = [0u8; 8];
+        buf.clone_from_slice(&dao[8..16]);
+        u64::from_le_bytes(buf)
+    };
+    let to_ar = {
+        let dao: [u8; 32] = to_header.dao().unpack();
+        let mut buf = [0u8; 8];
+        buf.clone_from_slice(&dao[8..16]);
+        u64::from_le_bytes(buf)
+    };
+
+    let counted_capacity = match original_capacity.checked_sub(occupied_capacity) {
+        Some(capacity) => capacity,
+        None => original_capacity,
+    };
+    let withdraw_counted_capacity =
+        (counted_capacity as u128 * to_ar as u128 / from_ar as u128) as u64;
+    withdraw_counted_capacity + occupied_capacity
+}
+
+pub fn calculate_dao_capacity_backward(
+    from_header: &HeaderView,
+    to_header: &HeaderView,
+    original_capacity: u64,
+    occupied_capacity: u64,
+) -> u64 {
+    let from_ar = {
+        let dao: [u8; 32] = from_header.dao().unpack();
+        let mut buf = [0u8; 8];
+        buf.clone_from_slice(&dao[8..16]);
+        u64::from_le_bytes(buf)
+    };
+    let to_ar = {
+        let dao: [u8; 32] = to_header.dao().unpack();
+        let mut buf = [0u8; 8];
+        buf.clone_from_slice(&dao[8..16]);
+        u64::from_le_bytes(buf)
+    };
+
+    let counted_capacity = match original_capacity.checked_sub(occupied_capacity) {
+        Some(capacity) => capacity,
+        None => original_capacity,
+    };
+    let withdraw_counted_capacity =
+        (counted_capacity as u128 * from_ar as u128 / to_ar as u128) as u64;
+    withdraw_counted_capacity + occupied_capacity
+}
+
+pub fn load_dckb_data(
+    rpc_client: &mut HttpRpcClient,
+    cell: LiveCellInfo,
+    tip: &HeaderView,
+) -> Result<DCKBLiveCellInfo, String> {
+    let tx = rpc_client
+        .get_transaction(cell.tx_hash.clone())?
+        .expect("tx");
+    let data = tx.transaction.inner.outputs_data[cell.index.output_index as usize].as_bytes();
+    let (dckb_amount, dckb_number) = {
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&data[..16]);
+        let dckb_amount = u128::from_le_bytes(buf) as u64;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&data[16..]);
+        let dckb_number = u64::from_le_bytes(buf);
+        (dckb_amount, dckb_number)
+    };
+    let cell_header: HeaderView = if dckb_number == 0 {
+        rpc_client
+            .get_header_by_number(cell.number)?
+            .expect("header")
+            .into()
+    } else {
+        rpc_client
+            .get_header_by_number(dckb_number)?
+            .expect("header")
+            .into()
+    };
+    let dckb_amount = calculate_dao_capacity(&cell_header, tip, dckb_amount, 0);
+
+    let dckb_height: u64 = tip.data().raw().number().unpack();
+    Ok(DCKBLiveCellInfo {
+        dckb_amount,
+        dckb_height,
+        cell,
+    })
 }

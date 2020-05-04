@@ -1,5 +1,5 @@
 use super::environment::DCKBENV;
-use super::util::minimal_unlock_point;
+use super::util::{calculate_dao_capacity_backward, load_dckb_data, minimal_unlock_point};
 use super::{
     DCKBLiveCellInfo, CUSTODIAN_CELL_CAPACITY, DCKB_CAPACITY, DCKB_DAO_CELL_CAPACITY,
     SECP256K1_CAPACITY,
@@ -11,11 +11,10 @@ use ckb_types::core::Capacity;
 use ckb_types::{
     bytes::Bytes,
     core::{HeaderView, ScriptHashType, TransactionBuilder, TransactionView},
-    packed::{self, Byte32, CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
+    packed::{self, CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
     prelude::*,
 };
 use std::cmp::max;
-use std::collections::HashSet;
 
 // NOTE: We assume all inputs are from same account
 #[derive(Debug)]
@@ -50,6 +49,27 @@ impl DAOBuilder {
         target_capacity: u64,
         target_lock: Script,
     ) -> Result<TransactionView, String> {
+        // get align target
+        let align_target: HeaderView = {
+            let tip_cell = dckb_live_cells
+                .iter()
+                .max_by_key(|cell| cell.cell.number)
+                .unwrap();
+            rpc_client
+                .get_header_by_number(tip_cell.cell.number)?
+                .unwrap()
+                .into()
+        };
+        // recalculate dckb_amount
+        let dckb_amount = calculate_dao_capacity_backward(&tip, &align_target, dckb_amount, 0);
+        drop(tip);
+        //  align dckb_live_cells to align target
+        let dckb_live_cells: Vec<_> = dckb_live_cells
+            .into_iter()
+            .map(|cell| {
+                load_dckb_data(rpc_client, cell.cell, &align_target).expect("load dckb cell")
+            })
+            .collect();
         let genesis_info = &self.genesis_info;
         let inputs = dckb_live_cells
             .iter()
@@ -80,20 +100,23 @@ impl DAOBuilder {
 
         let (dckb_output, dckb_output_data) = {
             // NOTE: Here give null lock script to the output. It's caller's duty to fill the lock
-            gen_dckb_cell(self.dckb_env.clone(), dckb_amount, tip.number())
+            gen_dckb_cell(self.dckb_env.clone(), dckb_amount, align_target.number())
         };
         // set transfer target
         let dckb_output = dckb_output.as_builder().lock(target_lock).build();
         // change cells
-        let (dckb_change, dckb_change_data) =
-            gen_dckb_cell(self.dckb_env.clone(), change_dckb_amount, tip.number());
+        let (dckb_change, dckb_change_data) = gen_dckb_cell(
+            self.dckb_env.clone(),
+            change_dckb_amount,
+            align_target.number(),
+        );
         let change = CellOutput::new_builder()
             .capacity(change_capacity.pack())
             .build();
         let cell_deps = vec![genesis_info.dao_dep(), self.dckb_dep()];
         let (dckb_lives_cells_with_number, mut header_deps) =
             dckb_cell_deps(rpc_client, dckb_live_cells);
-        header_deps.push(tip.clone());
+        header_deps.push(align_target.clone());
         header_deps.dedup_by_key(|h| h.number());
         let mut tx = TransactionBuilder::default()
             .inputs(inputs)
@@ -118,30 +141,11 @@ impl DAOBuilder {
                 .build();
         }
         let mut witnesses =
-            build_witness_for_ckb_cells(dckb_lives_cells_with_number, &header_deps, &tip);
+            build_witness_for_ckb_cells(dckb_lives_cells_with_number, &header_deps, &align_target);
         for _i in witnesses.len()..max(tx.inputs().len(), tx.outputs().len()) {
             witnesses.push(WitnessArgs::default().as_bytes().pack());
         }
         let tx = tx.as_advanced_builder().witnesses(witnesses).build();
-        let output_capacity = tx
-            .outputs()
-            .into_iter()
-            .map(|o| {
-                let c: Capacity = o.capacity().unpack();
-                c.as_u64()
-            })
-            .sum::<u64>();
-        let occupied_capacity = tx
-            .outputs()
-            .into_iter()
-            .zip(tx.outputs_data().into_iter())
-            .map(|(o, data)| {
-                let c: Capacity = o
-                    .occupied_capacity(Capacity::bytes(data.len()).unwrap())
-                    .unwrap();
-                c.as_u64()
-            })
-            .sum::<u64>();
         assert_eq!(input_dckb_amount, dckb_amount + change_dckb_amount);
         Ok(tx)
     }
@@ -212,7 +216,7 @@ impl DAOBuilder {
         &self,
         rpc_client: &mut HttpRpcClient,
         dckb_cells: Vec<DCKBLiveCellInfo>,
-        tip: HeaderView,
+        align_target: HeaderView,
     ) -> Result<TransactionView, String> {
         let genesis_info = &self.genesis_info;
         let dao_type_hash = genesis_info.dao_type_hash();
@@ -274,7 +278,8 @@ impl DAOBuilder {
             .capacity(CUSTODIAN_CELL_CAPACITY.pack())
             .type_(Some(dckb_script(self.dckb_env.clone())).pack())
             .build();
-        let custodian_cell_data: Bytes = dckb_data(custodian_dckb_amount.into(), tip.number());
+        let custodian_cell_data: Bytes =
+            dckb_data(custodian_dckb_amount.into(), align_target.number());
 
         let change_capacity = change_cells.iter().map(|txo| txo.capacity).sum::<u64>()
             - self.tx_fee
@@ -288,17 +293,17 @@ impl DAOBuilder {
             .capacity(DCKB_CAPACITY.pack())
             .type_(Some(dckb_script(self.dckb_env.clone())).pack())
             .build();
-        let dckb_change_data = dckb_data(dckb_change_capacity.into(), tip.number());
+        let dckb_change_data = dckb_data(dckb_change_capacity.into(), align_target.number());
 
         let (dckb_cells_with_number, mut header_deps) = dckb_cell_deps(rpc_client, dckb_cells);
         header_deps.extend(deposit_txo_headers.into_iter().map(|(_, _, header)| header));
-        header_deps.push(tip.clone());
+        header_deps.push(align_target.clone());
         header_deps.dedup_by_key(|h| h.hash());
 
         // custodian cell is last cell
         let custodian_cell_index: u8 = (tx.outputs().len() - 1 + 3) as u8;
         let dckb_witnesses =
-            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &tip);
+            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &align_target);
         let mut witnesses = vec![WitnessArgs::default()
             .as_builder()
             .lock(Some(Bytes::from(vec![custodian_cell_index])).pack())
@@ -336,7 +341,7 @@ impl DAOBuilder {
         rpc_client: &mut HttpRpcClient,
         custodian_cell: DCKBLiveCellInfo,
         mut dckb_cells: Vec<DCKBLiveCellInfo>,
-        tip: HeaderView,
+        align_target: HeaderView,
     ) -> Result<TransactionView, String> {
         let genesis_info = &self.genesis_info;
         let prepare_txo_headers = {
@@ -417,7 +422,7 @@ impl DAOBuilder {
                 .map(|(_, _, header)| header.clone());
             header_deps.extend(header_deps_iter);
         }
-        header_deps.push(tip.clone());
+        header_deps.push(align_target.clone());
         header_deps.dedup_by_key(|h| h.hash());
         let mut witnesses = deposit_txo_headers
             .iter()
@@ -425,7 +430,7 @@ impl DAOBuilder {
             .map(|(i, (_, _, header))| {
                 let index = header_deps
                     .iter()
-                    .position(|header| header.hash() == header.hash())
+                    .position(|h| h.hash() == header.hash())
                     .unwrap() as u64;
                 let mut witness_args = WitnessArgs::new_builder()
                     .input_type(Some(Bytes::from(index.to_le_bytes().to_vec())).pack());
@@ -437,7 +442,7 @@ impl DAOBuilder {
             })
             .collect::<Vec<_>>();
         let mut dckb_witnesses =
-            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &tip);
+            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &align_target);
         // rewrite custodian witness
         let custodian_witness_index = dckb_witnesses.len() - 1;
         let custodian_witness =
