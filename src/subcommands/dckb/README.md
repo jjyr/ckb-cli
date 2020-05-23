@@ -2,11 +2,19 @@
 
 DCKB related operations, this subcommand will migrate to plugin in the future.
 
+## Installation
+
+``` sh
+cargo install ckb-cli --git https://github.com/jjyr/ckb-cli.git --branch DCKB
+```
+
 ## Operations
 
 ### Deposit
 
 Deposit CKB to NervosDAO and get DCKB token.
+
+Notice: A block header became mature(referenceable) after four epochs, so after the deposition, we must wait for four epochs to transfer the newly created DCKB.
 
 ``` bash
 ckb-cli dckb deposit --from-account <address>  --capacity <deposit CKB amount> --tx-fee <fee>
