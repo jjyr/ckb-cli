@@ -31,6 +31,9 @@ impl<'a> CliSubCommand for DCKBSubCommand<'a> {
         debug: bool,
     ) -> Result<String, String> {
         let network_type = get_network_type(&mut self.rpc_client)?;
+        if network_type != NetworkType::Testnet {
+            return Err("only support testnet DCKB".to_string());
+        }
         match matches.subcommand() {
             ("deposit", Some(m)) => {
                 self.transact_args = Some(TransactArgs::from_matches(m, network_type)?);
