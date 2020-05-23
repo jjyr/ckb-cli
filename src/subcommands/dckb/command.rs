@@ -19,7 +19,7 @@ use ckb_types::{
     prelude::*,
     H160, H256,
 };
-use clap::{App, Arg, ArgMatches, SubCommand};
+use clap::{App, Arg, ArgMatches};
 use std::collections::HashSet;
 
 impl<'a> CliSubCommand for DCKBSubCommand<'a> {
@@ -132,40 +132,40 @@ impl<'a> CliSubCommand for DCKBSubCommand<'a> {
                 });
                 Ok(resp.render(format, color))
             }
-            _ => Err(matches.usage().to_owned()),
+            _ => Err(Self::subcommand().generate_usage()),
         }
     }
 }
 
 impl<'a> DCKBSubCommand<'a> {
-    pub fn subcommand() -> App<'static, 'static> {
-        SubCommand::with_name("dckb")
+    pub fn subcommand() -> App<'static> {
+        App::new("dckb")
             .about("Deposit / prepare / withdraw / query DCKB balance (with local index) / key utils")
             .subcommands(vec![
-                SubCommand::with_name("deposit")
+                App::new("deposit")
                     .about("Deposit capacity into NervosDAO")
                     .args(&TransactArgs::args())
                     .arg(arg::capacity().required(true)),
-                SubCommand::with_name("transfer")
+                App::new("transfer")
                     .about("transfer dckb")
                     .args(&TransactArgs::args())
                     .arg(arg::capacity().required(true))
                     .arg(arg::to_address().required(true)),
-                SubCommand::with_name("prepare")
+                App::new("prepare")
                     .about("Perform phase 1 withdraw from NervosDAO (destroy deposited amount DCKB), WARN: make sure you can perform phase2 withdraw within 42 epochs(~ 7 days), otherwise your coin will lose")
                     .args(&TransactArgs::args())
                     .arg(arg::out_point().required(true).multiple(true)),
-                SubCommand::with_name("withdraw")
+                App::new("withdraw")
                     .about("Perform phase 2 withdraw from NervosDAO (destroy compensation DCKB)")
                     .args(&TransactArgs::args())
                     .arg(arg::out_point().required(true).multiple(true)),
-                SubCommand::with_name("query-dckb")
+                App::new("query-dckb")
                     .about("Query DCKB amount by lock script hash or address")
                     .args(&QueryArgs::args()),
-                SubCommand::with_name("query-dao-cells")
+                App::new("query-dao-cells")
                     .about("Query deposited dao cells")
                     .args(&QueryArgs::args()),
-                SubCommand::with_name("query-prepared-cells")
+                App::new("query-prepared-cells")
                     .about("Query phase1 withdraw cells by lock script hash or address")
                     .args(&QueryArgs::args())
             ])
@@ -196,7 +196,7 @@ impl QueryArgs {
         Ok(Self { lock_hash })
     }
 
-    fn args<'a, 'b>() -> Vec<Arg<'a, 'b>> {
+    fn args<'a>() -> Vec<Arg<'a>> {
         vec![arg::lock_hash(), arg::address()]
     }
 }
@@ -235,12 +235,8 @@ impl TransactArgs {
         })
     }
 
-    fn args<'a, 'b>() -> Vec<Arg<'a, 'b>> {
-        vec![
-            arg::privkey_path().required_unless(arg::from_account().b.name),
-            arg::from_account().required_unless(arg::privkey_path().b.name),
-            arg::tx_fee().required(true),
-        ]
+    fn args<'a>() -> Vec<Arg<'a>> {
+        vec![arg::from_account(), arg::tx_fee(), arg::capacity()]
     }
 
     pub(crate) fn sighash_args(&self) -> H160 {

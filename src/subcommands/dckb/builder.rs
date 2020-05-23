@@ -141,7 +141,7 @@ impl DAOBuilder {
                 .build();
         }
         let mut witnesses =
-            build_witness_for_ckb_cells(dckb_lives_cells_with_number, &header_deps, &align_target);
+            build_witness_for_ckb_cells(dckb_lives_cells_with_number.len(), &align_target);
         for _i in witnesses.len()..max(tx.inputs().len(), tx.outputs().len()) {
             witnesses.push(WitnessArgs::default().as_bytes().pack());
         }
@@ -303,7 +303,7 @@ impl DAOBuilder {
         // custodian cell is last cell
         let custodian_cell_index: u8 = (tx.outputs().len() - 1 + 3) as u8;
         let dckb_witnesses =
-            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &align_target);
+            build_witness_for_ckb_cells(dckb_cells_with_number.len(), &align_target);
         let mut witnesses = vec![WitnessArgs::default()
             .as_builder()
             .lock(Some(Bytes::from(vec![custodian_cell_index])).pack())
@@ -442,7 +442,7 @@ impl DAOBuilder {
             })
             .collect::<Vec<_>>();
         let mut dckb_witnesses =
-            build_witness_for_ckb_cells(dckb_cells_with_number, &header_deps, &align_target);
+            build_witness_for_ckb_cells(dckb_cells_with_number.len(), &align_target);
         // rewrite custodian witness
         let custodian_witness_index = dckb_witnesses.len() - 1;
         let custodian_witness =
@@ -593,34 +593,18 @@ fn dckb_cell_deps(
     (dckb_lives_cells_with_number, header_deps)
 }
 
-fn build_witness_for_ckb_cells(
-    dckb_lives_cells_with_number: Vec<(DCKBLiveCellInfo, u64)>,
-    header_deps: &[HeaderView],
-    align_target: &HeaderView,
-) -> Vec<packed::Bytes> {
+fn build_witness_for_ckb_cells(len: usize, align_target: &HeaderView) -> Vec<packed::Bytes> {
     let mut witnesses = Vec::new();
-    for i in 0..dckb_lives_cells_with_number.len() {
-        let number = dckb_lives_cells_with_number[i].1;
-        let header_index = header_deps
-            .iter()
-            .position(|h| h.number() == number)
-            .unwrap();
-        let input_type = if i == 0 {
-            let align_target_index = header_deps
-                .iter()
-                .position(|h| h.number() == align_target.number())
-                .unwrap();
-            Bytes::from(vec![header_index as u8, align_target_index as u8])
-        } else {
-            Bytes::from(vec![header_index as u8])
-        };
-        witnesses.push(
+    for i in 0..len {
+        let witness = if i == 0 {
+            let input_type = Bytes::from(align_target.number().to_le_bytes().to_vec());
             WitnessArgs::new_builder()
                 .input_type(Some(input_type).pack())
                 .build()
-                .as_bytes()
-                .pack(),
-        );
+        } else {
+            WitnessArgs::default()
+        };
+        witnesses.push(witness.as_bytes().pack());
     }
     witnesses
 }

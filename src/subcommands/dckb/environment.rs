@@ -14,39 +14,51 @@ pub struct DCKBENV {
 
 impl DCKBENV {
     pub fn from_network(_network: NetworkType) -> Self {
-        let mut tx_hash = [0u8; 32];
+        let mut dckb_tx_hash = [0u8; 32];
         hex_decode(
-            b"5f2615f31e5c15e037e23a51e173a4c9856caa65a41301269fa12b33a9d58896",
-            &mut tx_hash,
+            b"06d4ac070827afa2a88a3583dea85f23309eee9f83ddcaa1ca521ee5f467b5f5",
+            &mut dckb_tx_hash,
+        )
+        .expect("dehex");
+        let mut dao_lock_tx_hash = [0u8; 32];
+        hex_decode(
+            b"69f4606d63f22a9b3b1ec11116ba4eba11351fe1def4d30e09aa2b8280494b23",
+            &mut dao_lock_tx_hash,
+        )
+        .expect("dehex");
+        let mut custodian_lock_tx_hash = [0u8; 32];
+        hex_decode(
+            b"8179b3965e324c336b93a3bf4d5ab71470fcec1b99de37a8efd1909ff6b3f12d",
+            &mut custodian_lock_tx_hash,
         )
         .expect("dehex");
         let dckb_out_point = OutPoint::new_builder()
-            .tx_hash(tx_hash.pack())
+            .tx_hash(dckb_tx_hash.pack())
             .index(0u32.pack())
             .build();
         let dao_lock_out_point = OutPoint::new_builder()
-            .tx_hash(tx_hash.pack())
-            .index(1u32.pack())
+            .tx_hash(dao_lock_tx_hash.pack())
+            .index(0u32.pack())
             .build();
         let custodian_lock_out_point = OutPoint::new_builder()
-            .tx_hash(tx_hash.pack())
-            .index(2u32.pack())
+            .tx_hash(custodian_lock_tx_hash.pack())
+            .index(0u32.pack())
             .build();
         let mut dckb_code_hash = [0u8; 32];
         hex_decode(
-            b"501fd8267f7448eda4f8b1d0245174c7fc163c1b2f149346abc097b319a1c624",
+            b"56721af2c8389a1582a0a32e6c2fe7429101acd13b861e7fbdf06a031c193de3",
             &mut dckb_code_hash,
         )
         .expect("dehex");
         let mut dao_lock_code_hash = [0u8; 32];
         hex_decode(
-            b"6e7cc0db0b2e932b2450a689017c96d06ae6ed08b6b7c60e92f8f52e72bb3219",
+            b"c485df2bf8ee48cba1af806a657bf4bdc28fe3b6fe9fc8c13502e7af0a96c59b",
             &mut dao_lock_code_hash,
         )
         .expect("dehex");
         let mut custodian_lock_code_hash = [0u8; 32];
         hex_decode(
-            b"1877350a85ab2325ef4b9eaabf54782561ad6a5b6cd206e57a8d478b430d81dd",
+            b"10c653a5cf01334a9339937751ec6d4fb4549f720b3456ebc58c91a76d4d76da",
             &mut custodian_lock_code_hash,
         )
         .expect("dehex");
