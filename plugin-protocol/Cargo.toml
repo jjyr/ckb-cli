@@ -8,8 +8,8 @@ edition = "2018"
 
 [dependencies]
 ckb-index = { path = "../ckb-index" }
-ckb-types = { version = "0.37.0" }
-ckb-jsonrpc-types = { version = "0.37.0" }
+ckb-types = { version = "0.38.0" }
+ckb-jsonrpc-types = { version = "0.38.0" }
 serde = { version = "1.0", features = ["rc"] }
 serde_derive = "1.0"
 serde_json = "1.0"
